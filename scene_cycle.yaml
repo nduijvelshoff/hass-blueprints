@@ -1,0 +1,200 @@
+blueprint:
+  name: Button – Daypart scenes with quick-cycle
+  description: >
+    Single press (lights off): activate the scene for the current time block.
+    Single press after a pause (lights on): turn off.
+    Quick press (lights on): cycle to the next scene, based on which scene
+    is currently active — determined from the scene's own last-activated timestamp.
+    No helper entity required.
+
+    Set *Active blocks* to the number of time blocks you want (1–5).
+    All five scene fields must be filled in; blocks above the selected number
+    are ignored.
+  domain: automation
+  author: nduijvelshoff
+  source_url: https://github.com/nduijvelshoff/hass-blueprints/blob/main/scene_cycle.yaml
+  input:
+    button_sensor:
+      name: Button (binary_sensor)
+      description: The binary_sensor that changes state when the button is pressed.
+      selector:
+        entity:
+          domain: binary_sensor
+
+    lights_entity:
+      name: Lights
+      description: Light group or entity to check state and turn off.
+      selector:
+        entity:
+          domain: light
+
+    quick_press_window:
+      name: Quick-press window (seconds)
+      description: >
+        Maximum time between two presses to count as a quick press (scene cycling).
+        A longer gap toggles the lights on/off instead.
+      default: 2
+      selector:
+        number:
+          min: 0.5
+          max: 10
+          step: 0.5
+          unit_of_measurement: s
+          mode: slider
+
+    num_blocks:
+      name: Active blocks (1–5)
+      description: >
+        How many time blocks are active. Blocks above this number are ignored.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 5
+          step: 1
+          mode: slider
+
+    time_1:
+      name: "Block 1 – start time"
+      default: "07:00:00"
+      selector: { time: {} }
+    scene_1:
+      name: "Block 1 – scene"
+      selector:
+        entity:
+          domain: scene
+
+    time_2:
+      name: "Block 2 – start time"
+      default: "10:00:00"
+      selector: { time: {} }
+    scene_2:
+      name: "Block 2 – scene"
+      selector:
+        entity:
+          domain: scene
+
+    time_3:
+      name: "Block 3 – start time"
+      default: "17:00:00"
+      selector: { time: {} }
+    scene_3:
+      name: "Block 3 – scene"
+      selector:
+        entity:
+          domain: scene
+
+    time_4:
+      name: "Block 4 – start time"
+      default: "20:00:00"
+      selector: { time: {} }
+    scene_4:
+      name: "Block 4 – scene"
+      selector:
+        entity:
+          domain: scene
+
+    time_5:
+      name: "Block 5 – start time"
+      default: "23:00:00"
+      selector: { time: {} }
+    scene_5:
+      name: "Block 5 – scene"
+      selector:
+        entity:
+          domain: scene
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input button_sensor
+
+variables:
+  _light:        !input lights_entity
+  _quick_window: !input quick_press_window
+  _num_blocks:   !input num_blocks
+  _s1: !input scene_1
+  _s2: !input scene_2
+  _s3: !input scene_3
+  _s4: !input scene_4
+  _s5: !input scene_5
+  _t1: !input time_1
+  _t2: !input time_2
+  _t3: !input time_3
+  _t4: !input time_4
+  _t5: !input time_5
+
+  # Comma-separated list of active scene entity IDs
+  _active_scenes: >
+    {% set n = _num_blocks | int(5) %}
+    {% set ns = namespace(out='') %}
+    {% if n >= 1 %}{% set ns.out = ns.out ~ _s1 ~ ',' %}{% endif %}
+    {% if n >= 2 %}{% set ns.out = ns.out ~ _s2 ~ ',' %}{% endif %}
+    {% if n >= 3 %}{% set ns.out = ns.out ~ _s3 ~ ',' %}{% endif %}
+    {% if n >= 4 %}{% set ns.out = ns.out ~ _s4 ~ ',' %}{% endif %}
+    {% if n >= 5 %}{% set ns.out = ns.out ~ _s5 ~ ',' %}{% endif %}
+    {{ ns.out[:-1] }}
+
+  # Seconds the sensor spent in its previous state = time between presses
+  _secs: "{{ (now() - trigger.from_state.last_changed).total_seconds() | float(9999) }}"
+  _is_quick: "{{ _secs < (_quick_window | float(2)) }}"
+  _lights_on: "{{ states(_light) == 'on' }}"
+
+  # Most recently activated scene among the active scenes
+  # (scene entity state = ISO timestamp of last activation)
+  _current_scene: >
+    {% set parts = _active_scenes.split(',') %}
+    {% set ns = namespace(scene=parts[0], ts=states(parts[0])) %}
+    {% for s in parts[1:] %}
+      {% if states(s) > ns.ts %}
+        {% set ns.ts = states(s) %}
+        {% set ns.scene = s %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.scene }}
+
+  # Scene matching the current time (first press / lights-off activation)
+  _time_scene_entity: >
+    {% set parts = _active_scenes.split(',') %}
+    {% set t = now().strftime('%H:%M:%S') %}
+    {% set n = _num_blocks | int(5) %}
+    {% set ns = namespace(r=0) %}
+    {% if n >= 1 and t >= _t1 %}{% set ns.r = 0 %}{% endif %}
+    {% if n >= 2 and t >= _t2 %}{% set ns.r = 1 %}{% endif %}
+    {% if n >= 3 and t >= _t3 %}{% set ns.r = 2 %}{% endif %}
+    {% if n >= 4 and t >= _t4 %}{% set ns.r = 3 %}{% endif %}
+    {% if n >= 5 and t >= _t5 %}{% set ns.r = 4 %}{% endif %}
+    {{ parts[ns.r % (parts | length)] }}
+
+  # Next scene after the currently active one (wraps around)
+  _next_scene_entity: >
+    {% set parts = _active_scenes.split(',') %}
+    {% set cur = _current_scene | trim %}
+    {% set ns = namespace(pos=-1) %}
+    {% for i in range(parts | length) %}
+      {% if parts[i] == cur %}{% set ns.pos = i %}{% endif %}
+    {% endfor %}
+    {{ parts[(ns.pos + 1) % (parts | length)] }}
+
+actions:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ _is_quick and _lights_on }}"
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ _next_scene_entity | trim }}"
+      - conditions:
+          - condition: template
+            value_template: "{{ not _is_quick and _lights_on }}"
+        sequence:
+          - action: homeassistant.turn_off
+            target:
+              entity_id: "{{ _light }}"
+    default:
+      - action: scene.turn_on
+        target:
+          entity_id: "{{ _time_scene_entity | trim }}"
