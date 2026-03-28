@@ -15,11 +15,13 @@ blueprint:
   source_url: https://github.com/nduijvelshoff/hass-blueprints/blob/main/scene_cycle.yaml
   input:
     button_sensor:
-      name: Button (binary_sensor)
-      description: The binary_sensor that changes state when the button is pressed.
+      name: Button (binary_sensor or event)
+      description: The binary_sensor or event entity that changes state when the button is pressed.
       selector:
         entity:
-          domain: binary_sensor
+          domain:
+            - binary_sensor
+            - event
 
     lights_entity:
       name: Lights
@@ -27,6 +29,15 @@ blueprint:
       selector:
         entity:
           domain: light
+
+    additional_lights:
+      name: Additional lights (optional)
+      description: Extra lights to turn on/off together with the main light. Leave empty if not needed.
+      default: []
+      selector:
+        entity:
+          domain: light
+          multiple: true
 
     quick_press_window:
       name: Quick-press window (seconds)
@@ -70,6 +81,7 @@ blueprint:
       selector: { time: {} }
     scene_2:
       name: "Block 2 – scene"
+      default: ""
       selector:
         entity:
           domain: scene
@@ -80,6 +92,7 @@ blueprint:
       selector: { time: {} }
     scene_3:
       name: "Block 3 – scene"
+      default: ""
       selector:
         entity:
           domain: scene
@@ -90,6 +103,7 @@ blueprint:
       selector: { time: {} }
     scene_4:
       name: "Block 4 – scene"
+      default: ""
       selector:
         entity:
           domain: scene
@@ -100,6 +114,7 @@ blueprint:
       selector: { time: {} }
     scene_5:
       name: "Block 5 – scene"
+      default: ""
       selector:
         entity:
           domain: scene
@@ -112,7 +127,8 @@ triggers:
     entity_id: !input button_sensor
 
 variables:
-  _light:        !input lights_entity
+  _light:             !input lights_entity
+  _additional_lights: !input additional_lights
   _quick_window: !input quick_press_window
   _num_blocks:   !input num_blocks
   _s1: !input scene_1
@@ -126,24 +142,20 @@ variables:
   _t4: !input time_4
   _t5: !input time_5
 
-  # Comma-separated list of active scene entity IDs
   _active_scenes: >
     {% set n = _num_blocks | int(5) %}
     {% set ns = namespace(out='') %}
-    {% if n >= 1 %}{% set ns.out = ns.out ~ _s1 ~ ',' %}{% endif %}
-    {% if n >= 2 %}{% set ns.out = ns.out ~ _s2 ~ ',' %}{% endif %}
-    {% if n >= 3 %}{% set ns.out = ns.out ~ _s3 ~ ',' %}{% endif %}
-    {% if n >= 4 %}{% set ns.out = ns.out ~ _s4 ~ ',' %}{% endif %}
-    {% if n >= 5 %}{% set ns.out = ns.out ~ _s5 ~ ',' %}{% endif %}
+    {% if n >= 1 and _s1 != '' %}{% set ns.out = ns.out ~ _s1 ~ ',' %}{% endif %}
+    {% if n >= 2 and _s2 != '' %}{% set ns.out = ns.out ~ _s2 ~ ',' %}{% endif %}
+    {% if n >= 3 and _s3 != '' %}{% set ns.out = ns.out ~ _s3 ~ ',' %}{% endif %}
+    {% if n >= 4 and _s4 != '' %}{% set ns.out = ns.out ~ _s4 ~ ',' %}{% endif %}
+    {% if n >= 5 and _s5 != '' %}{% set ns.out = ns.out ~ _s5 ~ ',' %}{% endif %}
     {{ ns.out[:-1] }}
 
-  # Seconds the sensor spent in its previous state = time between presses
   _secs: "{{ (now() - trigger.from_state.last_changed).total_seconds() | float(9999) }}"
   _is_quick: "{{ _secs < (_quick_window | float(2)) }}"
   _lights_on: "{{ states(_light) == 'on' }}"
 
-  # Most recently activated scene among the active scenes
-  # (scene entity state = ISO timestamp of last activation)
   _current_scene: >
     {% set parts = _active_scenes.split(',') %}
     {% set ns = namespace(scene=parts[0], ts=states(parts[0])) %}
@@ -155,12 +167,11 @@ variables:
     {% endfor %}
     {{ ns.scene }}
 
-  # Scene matching the current time (first press / lights-off activation)
   _time_scene_entity: >
     {% set parts = _active_scenes.split(',') %}
     {% set t = now().strftime('%H:%M:%S') %}
-    {% set n = _num_blocks | int(5) %}
-    {% set ns = namespace(r=0) %}
+    {% set n = parts | length %}
+    {% set ns = namespace(r=n - 1) %}
     {% if n >= 1 and t >= _t1 %}{% set ns.r = 0 %}{% endif %}
     {% if n >= 2 and t >= _t2 %}{% set ns.r = 1 %}{% endif %}
     {% if n >= 3 and t >= _t3 %}{% set ns.r = 2 %}{% endif %}
@@ -168,7 +179,6 @@ variables:
     {% if n >= 5 and t >= _t5 %}{% set ns.r = 4 %}{% endif %}
     {{ parts[ns.r % (parts | length)] }}
 
-  # Next scene after the currently active one (wraps around)
   _next_scene_entity: >
     {% set parts = _active_scenes.split(',') %}
     {% set cur = _current_scene | trim %}
@@ -187,14 +197,24 @@ actions:
           - action: scene.turn_on
             target:
               entity_id: "{{ _next_scene_entity | trim }}"
+          - if: "{{ _additional_lights | length > 0 }}"
+            then:
+              - action: homeassistant.turn_on
+                target:
+                  entity_id: "{{ _additional_lights }}"
       - conditions:
           - condition: template
             value_template: "{{ not _is_quick and _lights_on }}"
         sequence:
           - action: homeassistant.turn_off
             target:
-              entity_id: "{{ _light }}"
+              entity_id: "{{ [_light] + _additional_lights }}"
     default:
       - action: scene.turn_on
         target:
           entity_id: "{{ _time_scene_entity | trim }}"
+      - if: "{{ _additional_lights | length > 0 }}"
+        then:
+          - action: homeassistant.turn_on
+            target:
+              entity_id: "{{ _additional_lights }}"
