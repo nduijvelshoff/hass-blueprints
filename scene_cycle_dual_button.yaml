@@ -1,0 +1,263 @@
+blueprint:
+  name: Dual Button – Scene Cycle Up/Down
+  description: >
+    Two-button remote for manual scene cycling and dimming. No time-based logic.
+
+    Button 1 (up)   — single press: turn on (if off); double press: next scene; hold: dim up in steps.
+    Button 2 (down) — single press: turn off (if on); double press: prev scene; hold: dim down in steps.
+  domain: automation
+  author: nduijvelshoff
+  input:
+    button_up:
+      name: Button Up (event entity)
+      description: Event entity for the "up / next" button.
+      selector:
+        entity:
+          domain: event
+
+    button_down:
+      name: Button Down (event entity)
+      description: Event entity for the "down / previous" button.
+      selector:
+        entity:
+          domain: event
+
+    lights_entity:
+      name: Light
+      description: Light entity to control.
+      selector:
+        entity:
+          domain: light
+
+    dim_step:
+      name: Dim step (%)
+      description: >
+        Brightness percentage to increase or decrease per loop iteration while
+        the button is held.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 20
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    dim_interval:
+      name: Dim interval (ms)
+      description: >
+        Milliseconds between each brightness step while holding. Lower = faster dimming.
+      default: 500
+      selector:
+        number:
+          min: 100
+          max: 1000
+          step: 50
+          unit_of_measurement: ms
+          mode: slider
+
+    num_scenes:
+      name: Active scenes (1–5)
+      description: How many scenes are active. Scenes above this number are ignored.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 5
+          step: 1
+          mode: slider
+
+    scene_1:
+      name: Scene 1
+      selector:
+        entity:
+          domain: scene
+
+    scene_2:
+      name: Scene 2
+      default: ""
+      selector:
+        entity:
+          domain: scene
+
+    scene_3:
+      name: Scene 3
+      default: ""
+      selector:
+        entity:
+          domain: scene
+
+    scene_4:
+      name: Scene 4
+      default: ""
+      selector:
+        entity:
+          domain: scene
+
+    scene_5:
+      name: Scene 5
+      default: ""
+      selector:
+        entity:
+          domain: scene
+
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input button_up
+    id: up
+  - trigger: state
+    entity_id: !input button_down
+    id: down
+
+variables:
+  _num_scenes:   !input num_scenes
+  _s1:           !input scene_1
+  _s2:           !input scene_2
+  _s3:           !input scene_3
+  _s4:           !input scene_4
+  _s5:           !input scene_5
+  _dim_step:     !input dim_step
+  _dim_interval: !input dim_interval
+  _light:          !input lights_entity
+
+  _active_scenes: >
+    {% set n = _num_scenes | int(5) %}
+    {% set ns = namespace(out='') %}
+    {% if n >= 1 and _s1 != '' %}{% set ns.out = ns.out ~ _s1 ~ ',' %}{% endif %}
+    {% if n >= 2 and _s2 != '' %}{% set ns.out = ns.out ~ _s2 ~ ',' %}{% endif %}
+    {% if n >= 3 and _s3 != '' %}{% set ns.out = ns.out ~ _s3 ~ ',' %}{% endif %}
+    {% if n >= 4 and _s4 != '' %}{% set ns.out = ns.out ~ _s4 ~ ',' %}{% endif %}
+    {% if n >= 5 and _s5 != '' %}{% set ns.out = ns.out ~ _s5 ~ ',' %}{% endif %}
+    {{ ns.out[:-1] }}
+
+  # Scene with the most recent activation datetime is the current scene.
+  # as_datetime() | default(epoch, true) handles 'unknown'/'unavailable' states
+  # (as_datetime returns None for those, and default(x, true) catches None).
+  _current_scene: >
+    {% set epoch = as_datetime('1970-01-01T00:00:00+00:00') %}
+    {% set parts = _active_scenes.split(',') %}
+    {% set ns = namespace(scene=parts[0] | trim, ts=as_datetime(states(parts[0] | trim)) | default(epoch, true)) %}
+    {% for s in parts[1:] %}
+      {% set t = as_datetime(states(s | trim)) | default(epoch, true) %}
+      {% if t > ns.ts %}
+        {% set ns.ts = t %}
+        {% set ns.scene = s | trim %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.scene | trim }}
+
+  _next_scene: >
+    {% set parts = _active_scenes.split(',') %}
+    {% set cur = _current_scene | trim %}
+    {% set ns = namespace(pos=0) %}
+    {% for i in range(parts | length) %}
+      {% if parts[i] | trim == cur %}{% set ns.pos = i %}{% endif %}
+    {% endfor %}
+    {{ parts[(ns.pos + 1) % (parts | length)] | trim }}
+
+  _prev_scene: >
+    {% set parts = _active_scenes.split(',') %}
+    {% set cur = _current_scene | trim %}
+    {% set ns = namespace(pos=0) %}
+    {% for i in range(parts | length) %}
+      {% if parts[i] | trim == cur %}{% set ns.pos = i %}{% endif %}
+    {% endfor %}
+    {{ parts[(ns.pos - 1) % (parts | length)] | trim }}
+
+  _first_scene: "{{ (_active_scenes.split(','))[0] | trim }}"
+
+actions:
+  - variables:
+      _ev: "{{ trigger.to_state.attributes.event_type | default('') }}"
+      _on: "{{ states(_light) == 'on' }}"
+
+  - choose:
+
+      # ── UP single press, lights OFF → turn on first scene ─────────────────
+      - conditions:
+          - condition: trigger
+            id: up
+          - condition: template
+            value_template: "{{ _ev == 'multi_press_1' and not _on }}"
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ _first_scene }}"
+
+      # ── UP double press → next scene ──────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: up
+          - condition: template
+            value_template: "{{ _ev == 'multi_press_2' }}"
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ _next_scene }}"
+
+      # ── UP long press → loop dim up until long_release interrupts ────────
+      - conditions:
+          - condition: trigger
+            id: up
+          - condition: template
+            value_template: "{{ _ev == 'long_press' }}"
+        sequence:
+          - repeat:
+              count: 30
+              sequence:
+                - action: light.turn_on
+                  target:
+                    entity_id: "{{ _light }}"
+                  data:
+                    brightness_pct: >
+                      {% set cur = (state_attr(_light, 'brightness') | int(1)) / 255 * 100 %}
+                      {{ [cur + (_dim_step | int(5)), 100] | min | int }}
+                    transition: "{{ (_dim_interval | int(500)) / 1000 }}"
+                - delay:
+                    milliseconds: "{{ _dim_interval | int(500) }}"
+
+      # ── DOWN single press, lights ON → turn off ───────────────────────────
+      - conditions:
+          - condition: trigger
+            id: down
+          - condition: template
+            value_template: "{{ _ev == 'multi_press_1' and _on }}"
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ _light }}"
+
+      # ── DOWN double press → previous scene ────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: down
+          - condition: template
+            value_template: "{{ _ev == 'multi_press_2' }}"
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: "{{ _prev_scene }}"
+
+      # ── DOWN long press → loop dim down until long_release interrupts ────
+      - conditions:
+          - condition: trigger
+            id: down
+          - condition: template
+            value_template: "{{ _ev == 'long_press' }}"
+        sequence:
+          - repeat:
+              count: 30
+              sequence:
+                - action: light.turn_on
+                  target:
+                    entity_id: "{{ _light }}"
+                  data:
+                    brightness_pct: >
+                      {% set cur = (state_attr(_light, 'brightness') | int(255)) / 255 * 100 %}
+                      {{ [cur - (_dim_step | int(5)), 1] | max | int }}
+                    transition: "{{ (_dim_interval | int(500)) / 1000 }}"
+                - delay:
+                    milliseconds: "{{ _dim_interval | int(500) }}"
